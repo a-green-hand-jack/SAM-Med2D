@@ -1,4 +1,3 @@
-
 import os
 from torch.utils.data import Dataset
 import albumentations as A
@@ -12,11 +11,38 @@ from tqdm import tqdm
 from utils import train_transforms, get_boxes_from_mask, init_point_sampling
 import json
 import random
+from dataclasses import dataclass
+from typing import Dict, Union, Sequence
+from pathlib import Path
+import torch
+import pickle
+from collections import defaultdict
+
+# # debug
+# import debugpy
+
+# try:
+#     # 5678 is the default attach port in the VS Code debug configurations. Unless a host and port are specified, host defaults to 127.0.0.1
+#     debugpy.listen(("localhost", 9525))
+#     print("Waiting for debugger attach")
+#     print("the python code is DataLoader.py")
+#     print("the host is: localhost, the port is: 9525")
+#     debugpy.wait_for_client()
+# except Exception as e:
+#     pass
 
 
 class TestingDataset(Dataset):
-    
-    def __init__(self, data_path, image_size=256, mode='test', requires_name=True, point_num=1, return_ori_mask=True, prompt_path=None):
+    def __init__(
+        self,
+        data_path,
+        image_size=256,
+        mode="test",
+        requires_name=True,
+        point_num=1,
+        return_ori_mask=True,
+        prompt_path=None,
+    ):
         """
         Initializes a TestingDataset object.
         Args:
@@ -31,19 +57,21 @@ class TestingDataset(Dataset):
         self.image_size = image_size
         self.return_ori_mask = return_ori_mask
         self.prompt_path = prompt_path
-        self.prompt_list = {} if prompt_path is None else json.load(open(prompt_path, "r"))
+        self.prompt_list = (
+            {} if prompt_path is None else json.load(open(prompt_path, "r"))
+        )
         self.requires_name = requires_name
         self.point_num = point_num
 
-        json_file = open(os.path.join(data_path, f'label2image_{mode}.json'), "r")
+        json_file = open(os.path.join(data_path, f"label2image_{mode}.json"), "r")
         dataset = json.load(json_file)
-    
+
         self.image_paths = list(dataset.values())
         self.label_paths = list(dataset.keys())
-      
+
         self.pixel_mean = [123.675, 116.28, 103.53]
         self.pixel_std = [58.395, 57.12, 57.375]
-    
+
     def __getitem__(self, index):
         """
         Retrieves and preprocesses an item from the dataset.
@@ -61,27 +89,35 @@ class TestingDataset(Dataset):
 
         mask_path = self.label_paths[index]
         ori_np_mask = cv2.imread(mask_path, 0)
-        
+
         if ori_np_mask.max() == 255:
             ori_np_mask = ori_np_mask / 255
 
-        assert np.array_equal(ori_np_mask, ori_np_mask.astype(bool)), f"Mask should only contain binary values 0 and 1. {self.label_paths[index]}"
+        assert np.array_equal(
+            ori_np_mask, ori_np_mask.astype(bool)
+        ), f"Mask should only contain binary values 0 and 1. {self.label_paths[index]}"
 
         h, w = ori_np_mask.shape
         ori_mask = torch.tensor(ori_np_mask).unsqueeze(0)
 
         transforms = train_transforms(self.image_size, h, w)
         augments = transforms(image=image, mask=ori_np_mask)
-        image, mask = augments['image'], augments['mask'].to(torch.int64)
+        image, mask = augments["image"], augments["mask"].to(torch.int64)
 
         if self.prompt_path is None:
-            boxes = get_boxes_from_mask(mask, max_pixel = 0)
+            boxes = get_boxes_from_mask(mask, max_pixel=0)
             point_coords, point_labels = init_point_sampling(mask, self.point_num)
         else:
-            prompt_key = mask_path.split('/')[-1]
-            boxes = torch.as_tensor(self.prompt_list[prompt_key]["boxes"], dtype=torch.float)
-            point_coords = torch.as_tensor(self.prompt_list[prompt_key]["point_coords"], dtype=torch.float)
-            point_labels = torch.as_tensor(self.prompt_list[prompt_key]["point_labels"], dtype=torch.int)
+            prompt_key = mask_path.split("/")[-1]
+            boxes = torch.as_tensor(
+                self.prompt_list[prompt_key]["boxes"], dtype=torch.float
+            )
+            point_coords = torch.as_tensor(
+                self.prompt_list[prompt_key]["point_coords"], dtype=torch.float
+            )
+            point_labels = torch.as_tensor(
+                self.prompt_list[prompt_key]["point_labels"], dtype=torch.int
+            )
 
         image_input["image"] = image
         image_input["label"] = mask.unsqueeze(0)
@@ -89,12 +125,12 @@ class TestingDataset(Dataset):
         image_input["point_labels"] = point_labels
         image_input["boxes"] = boxes
         image_input["original_size"] = (h, w)
-        image_input["label_path"] = '/'.join(mask_path.split('/')[:-1])
+        image_input["label_path"] = "/".join(mask_path.split("/")[:-1])
 
         if self.return_ori_mask:
             image_input["ori_label"] = ori_mask
-     
-        image_name = self.label_paths[index].split('/')[-1]
+
+        image_name = self.label_paths[index].split("/")[-1]
         if self.requires_name:
             image_input["name"] = image_name
             return image_input
@@ -106,7 +142,15 @@ class TestingDataset(Dataset):
 
 
 class TrainingDataset(Dataset):
-    def __init__(self, data_dir, image_size=256, mode='train', requires_name=True, point_num=1, mask_num=5):
+    def __init__(
+        self,
+        data_dir,
+        image_size=256,
+        mode="train",
+        requires_name=True,
+        point_num=1,
+        mask_num=5,
+    ):
         """
         Initializes a training dataset.
         Args:
@@ -124,10 +168,12 @@ class TrainingDataset(Dataset):
         self.pixel_mean = [123.675, 116.28, 103.53]
         self.pixel_std = [58.395, 57.12, 57.375]
 
-        dataset = json.load(open(os.path.join(data_dir, f'image2label_{mode}.json'), "r"))
+        dataset = json.load(
+            open(os.path.join(data_dir, f"image2label_{mode}.json"), "r")
+        )
         self.image_paths = list(dataset.keys())
         self.label_paths = list(dataset.values())
-    
+
     def __getitem__(self, index):
         """
         Returns a sample from the dataset.
@@ -146,7 +192,7 @@ class TrainingDataset(Dataset):
 
         h, w, _ = image.shape
         transforms = train_transforms(self.image_size, h, w)
-    
+
         masks_list = []
         boxes_list = []
         point_coords_list, point_labels_list = [], []
@@ -157,7 +203,10 @@ class TrainingDataset(Dataset):
                 pre_mask = pre_mask / 255
 
             augments = transforms(image=image, mask=pre_mask)
-            image_tensor, mask_tensor = augments['image'], augments['mask'].to(torch.int64)
+            image_tensor, mask_tensor = (
+                augments["image"],
+                augments["mask"].to(torch.int64),
+            )
 
             boxes = get_boxes_from_mask(mask_tensor)
             point_coords, point_label = init_point_sampling(mask_tensor, self.point_num)
@@ -178,19 +227,20 @@ class TrainingDataset(Dataset):
         image_input["point_coords"] = point_coords
         image_input["point_labels"] = point_labels
 
-        image_name = self.image_paths[index].split('/')[-1]
-        if self.requires_name:
+        image_name = self.image_paths[index].split("/")[-1]
+        if self.requires_name:  # True
             image_input["name"] = image_name
             return image_input
         else:
             return image_input
+
     def __len__(self):
         return len(self.image_paths)
 
 
-def stack_dict_batched(batched_input):
+def stack_dict_batched(batched_input:Dict):
     out_dict = {}
-    for k,v in batched_input.items():
+    for k, v in batched_input.items():
         if isinstance(v, list):
             out_dict[k] = v
         else:
@@ -198,11 +248,71 @@ def stack_dict_batched(batched_input):
     return out_dict
 
 
-if __name__ == "__main__":
-    train_dataset = TrainingDataset("data_demo", image_size=256, mode='train', requires_name=True, point_num=1, mask_num=5)
-    print("Dataset:", len(train_dataset))
-    train_batch_sampler = DataLoader(dataset=train_dataset, batch_size=2, shuffle=True, num_workers=4)
-    for i, batched_image in enumerate(tqdm(train_batch_sampler)):
-        batched_image = stack_dict_batched(batched_image)
-        print(batched_image["image"].shape, batched_image["label"].shape)
+@dataclass
+class DataCollator:
+    def __init__(
+        self,
+    ):
+        pass
 
+    def _prepare_batch(self, features: Sequence[Dict]):
+        """
+        将包含字典的列表转化为一个新字典，新字典的键是原字典的键，
+        而值是原字典中对应键的所有值的列表。
+
+        参数:
+        - features: 包含字典的列表。
+
+        返回:
+        - result_dict: 转化后的字典，其中每个键对应一个列表，列表包含原列表中所有字典的对应值。
+        """
+        result_dict = defaultdict(list)  # 使用defaultdict来自动创建空列表
+
+        for feature in features:
+            for key, value in feature.items():  # 遍历每个字典的键值对
+                result_dict[key].append(value)  # 将值添加到对应的列表中
+        
+        for k, v in result_dict.items():
+            if isinstance(v[0], str):
+                result_dict[k] = v
+            elif isinstance(v[0], torch.Tensor):
+                result_dict[k] = torch.stack(tensors=v, dim=0)
+
+        return result_dict
+
+    def __call__(self, features: Sequence[Dict]) -> Dict[str, torch.Tensor]:
+        """
+        Calls the data collator.
+
+        Args:
+            features (Sequence[Dict]): List of features.
+
+        Returns:
+            Dict[str, torch.Tensor]: Batch of prepared data.
+        """
+        batch = self._prepare_batch(features)
+        return batch
+
+
+if __name__ == "__main__":
+    train_dataset = TrainingDataset(
+        "data_demo",
+        image_size=256,
+        mode="train",
+        requires_name=True,
+        point_num=1,
+        mask_num=5,
+    )
+    print("Dataset:", len(train_dataset))
+    test_datacollator = DataCollator()
+    train_batch_sampler = DataLoader(
+        dataset=train_dataset,
+        batch_size=2,
+        shuffle=True,
+        num_workers=4,
+        collate_fn=test_datacollator,
+    )
+    for i, batched_image in enumerate(tqdm(train_batch_sampler)):
+        # batched_image = stack_dict_batched(batched_image)
+        # print(batched_image.keys())
+        print(batched_image["image"].shape, batched_image["label"].shape)
