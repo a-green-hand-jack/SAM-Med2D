@@ -10,6 +10,7 @@ import argparse
 import warnings
 import numpy as np
 import albumentations as A
+from typing import List, Tuple, Any, Dict
 
 import torch
 import torch.nn as nn
@@ -102,20 +103,38 @@ parser.add_argument(
     ),
 )
 
-class OnnxEncoderModel(nn.Module):
 
-    pixel_mean = [123.675, 116.28, 103.53]
-    pixel_std  = [58.395, 57.12, 57.375]
+class OnnxEncoderModel(nn.Module):
+    """
+    封装了图像预处理和特征编码的模型类。
+
+    Attributes:
+        pixel_mean (List[float]): 图像预处理中使用的均值。
+        pixel_std (List[float]): 图像预处理中使用的方差。
+    """
+
+    pixel_mean: List[float] = [123.675, 116.28, 103.53]
+    pixel_std: List[float] = [58.395, 57.12, 57.375]
 
     def __init__(
         self,
         model: Sam,
-        input_size: tuple = (256, 256),
-        pixel_mean: list = [123.675, 116.28, 103.53],
-        pixel_std: list=[58.395, 57.12, 57.375],
+        input_size: Tuple[int, int] = (256, 256),
+        pixel_mean: List[float] = [123.675, 116.28, 103.53],
+        pixel_std: List[float] = [58.395, 57.12, 57.375],
         use_preprocess: bool = False
     ):
-        super().__init__()
+        """
+        初始化OnnxEncoderModel实例。
+
+        Args:
+            model (Sam): 基础模型，通常是一个SAM模型。
+            input_size (Tuple[int, int], optional): 输入图像的尺寸。默认为(256, 256)。
+            pixel_mean (List[float], optional): 图像预处理中使用的均值。默认为[123.675, 116.28, 103.53]。
+            pixel_std (List[float], optional): 图像预处理中使用的方差。默认为[58.395, 57.12, 57.375]。
+            use_preprocess (bool, optional): 是否使用预处理。默认为False。
+        """
+        super(OnnxEncoderModel, self).__init__()
         self.use_preprocess = use_preprocess
         self.pixel_mean = torch.tensor(pixel_mean, dtype=torch.float)
         self.pixel_std = torch.tensor(pixel_std, dtype=torch.float)
@@ -124,54 +143,72 @@ class OnnxEncoderModel(nn.Module):
         self.image_encoder = model.image_encoder
     
     @torch.no_grad()
-    def forward(self, input_image: torch.Tensor):
+    def forward(self, input_image: torch.Tensor) -> torch.Tensor:
+        """
+        前向传播函数。
+
+        处理输入图像并返回图像嵌入。
+
+        Args:
+            input_image (torch.Tensor): 输入图像张量。
+
+        Returns:
+            torch.Tensor: 图像嵌入。
+        """
         if self.use_preprocess:
             input_image = self.preprocess(input_image)
         image_embeddings = self.image_encoder(input_image)
         return image_embeddings
 
     def preprocess(self, input_image: torch.Tensor) -> torch.Tensor:
-        """Image transform
+        """
+        图像预处理。
 
-        This function can convert the input image to the required input format for VIT.
+        将输入图像转换为模型所需的格式。
 
         Args:
-            img (torch.Tensor): Input image in BGR format.
+            input_image (torch.Tensor): 输入图像张量。
 
         Returns:
-            torch.Tensor: Transformed image.
+            torch.Tensor: 预处理后的图像张量。
         """
-
-        # Normalization
+        # 归一化
         input_image = (input_image - self.pixel_mean) / self.pixel_std
 
-        # permute channels
+        # 通道置换，从BGR到RGB
         input_image = torch.permute(input_image, (2, 0, 1))
 
-        # CHW -> NCHW & Resize
+        # 从CHW转换为NCHW，并调整图像尺寸
         input_image = F.interpolate(input_image.unsqueeze(0), size=self.input_size, mode='nearest')
 
-        return input_image
+        return input_image.squeeze(0)
+    
 
+def run_export(args: Dict[str, Any]) -> None:
+    """
+    导出模型为ONNX格式。
 
-def run_export(args):
-    print("Loading model...")
-    sam = sam_model_registry[args.model_type](args).to(args.device)
+    Args:
+        args (Dict[str, Any]): 包含模型导出参数的字典。
+    """
+    print("正在加载模型...")
+    sam = sam_model_registry[args['model_type']](args).to(args['device'])
 
     model = OnnxEncoderModel(
         model=sam,
-        use_preprocess=args.use_preprocess,
+        use_preprocess=args['use_preprocess'],
         pixel_mean=[123.675, 116.28, 103.53],
         pixel_std=[58.395, 57.12, 57.375],
     )
 
-    if args.gelu_approximate:
+    # 如果需要，替换GELU操作为tanh近似
+    if args['gelu_approximate']:
         for _, m in model.named_modules():
             if isinstance(m, torch.nn.GELU):
                 m.approximate = "tanh"
 
     image_size = sam.image_encoder.img_size
-    if args.use_preprocess:
+    if args['use_preprocess']:
         dummy_inputs = {
             "input_image": torch.randn(
                 (image_size, image_size, 3), dtype=torch.float
@@ -187,15 +224,16 @@ def run_export(args):
             )
         }
         dynamic_axes = None
+
     _ = model(**dummy_inputs)
 
     output_names = ["image_embeddings"]
-    onnx_base = os.path.splitext(os.path.basename(args.output))[0]
+    onnx_base = os.path.splitext(os.path.basename(args['output']))[0]
     with warnings.catch_warnings():
         warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
         warnings.filterwarnings("ignore", category=UserWarning)
-        print(f"Exporting onnx model to {args.output}...")
-        if args.model_type == "vit_h":
+        print(f"正在导出ONNX模型到 {args['output']}...")
+        if args['model_type'] == "vit_h":
             tmp_dir = mkdtemp()
             tmp_model_path = os.path.join(tmp_dir, f"{onnx_base}.onnx")
             torch.onnx.export(
@@ -204,15 +242,15 @@ def run_export(args):
                 tmp_model_path,
                 export_params=True,
                 verbose=False,
-                opset_version=args.opset,
+                opset_version=args['opset'],
                 do_constant_folding=True,
                 input_names=list(dummy_inputs.keys()),
                 output_names=output_names,
                 dynamic_axes=dynamic_axes,
             )
 
-            # Combine the weights into a single file
-            pathlib.Path(args.output).parent.mkdir(parents=True, exist_ok=True)
+            # 将权重合并到一个文件中
+            pathlib.Path(args['output']).parent.mkdir(parents=True, exist_ok=True)
             model = onnx.load(tmp_model_path)
             convert_model_to_external_data(
                 model,
@@ -222,20 +260,20 @@ def run_export(args):
                 convert_attribute=False,
             )
 
-            # Save the model
-            onnx.save(model, args.output)
+            # 保存模型
+            onnx.save(model, args['output'])
 
-            # Cleanup the temporary directory
+            # 清理临时目录
             shutil.rmtree(tmp_dir)
         else:
-            with open(args.output, "wb") as f:
+            with open(args['output'], "wb") as f:
                 torch.onnx.export(
                     model,
                     tuple(dummy_inputs.values()),
                     f,
                     export_params=True,
                     verbose=False,
-                    opset_version=args.opset,
+                    opset_version=args['opset'],
                     do_constant_folding=True,
                     input_names=list(dummy_inputs.keys()),
                     output_names=output_names,
@@ -244,10 +282,9 @@ def run_export(args):
 
     if onnxruntime_exists:
         ort_inputs = {k: to_numpy(v) for k, v in dummy_inputs.items()}
-        ort_session = onnxruntime.InferenceSession(args.output)
+        ort_session = onnxruntime.InferenceSession(args['output'])
         _ = ort_session.run(None, ort_inputs)
-        print("Model has successfully been run with ONNXRuntime.")
-
+        print("模型已成功使用ONNXRuntime运行。")
 
 def to_numpy(tensor):
     return tensor.cpu().numpy()
